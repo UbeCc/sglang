@@ -13,6 +13,7 @@
 pub use crate::protocols::UNKNOWN_MODEL_ID;
 
 pub mod circuit_breaker;
+pub mod dp_routing_manager;
 pub mod error;
 pub mod job_queue;
 pub mod metrics_aggregator;
@@ -29,6 +30,7 @@ pub mod worker_service;
 
 // Re-export commonly used types for convenience
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+pub use dp_routing_manager::DpRoutingManager;
 pub use error::{WorkerError, WorkerResult};
 pub use job_queue::{Job, JobQueue, JobQueueConfig};
 pub use model_card::{ModelCard, ProviderType};

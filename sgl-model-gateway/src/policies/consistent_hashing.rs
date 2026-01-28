@@ -24,7 +24,10 @@ use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::{
     core::Worker,
     observability::metrics::Metrics,
-    routers::header_utils::{extract_routing_key, extract_target_worker},
+    routers::header_utils::{
+        extract_main_key_from_headers, extract_main_key_from_json, extract_routing_key,
+        extract_target_worker,
+    },
 };
 
 /// Execution branch for metrics
@@ -34,6 +37,8 @@ enum Branch {
     TargetWorkerHit,
     TargetWorkerMiss,
     RoutingKeyHit,
+    MainKeyHit,
+    MainKeyLoadBased,
     RandomFallback,
 }
 
@@ -45,6 +50,8 @@ impl Branch {
             Self::TargetWorkerHit => "target_worker_hit",
             Self::TargetWorkerMiss => "target_worker_miss",
             Self::RoutingKeyHit => "routing_key_hit",
+            Self::MainKeyHit => "main_key_hit",
+            Self::MainKeyLoadBased => "main_key_load_based",
             Self::RandomFallback => "random_fallback",
         }
     }
@@ -124,7 +131,61 @@ impl ConsistentHashingPolicy {
             return (None, Branch::TargetWorkerMiss);
         }
 
-        // Priority 2: X-SMG-Routing-Key - consistent hash routing (O(log n))
+        // Priority 2: Main key routing (if DP routing manager is available)
+        if let Some(dp_manager) = info.dp_routing_manager {
+            // Extract main_key from headers or JSON body
+            let main_key = info.main_key.or_else(|| {
+                extract_main_key_from_headers(info.headers)
+                    .or_else(|| info.json_body.and_then(extract_main_key_from_json))
+            });
+
+            if let Some(key) = main_key {
+                // Check if we have an existing mapping for this main_key
+                if let Some((worker_url, _dp_rank)) = dp_manager.get_worker_dp(key) {
+                    // Find worker by URL
+                    if let Some(idx) = workers
+                        .iter()
+                        .position(|w| w.url() == worker_url && w.is_healthy())
+                    {
+                        return (Some(idx), Branch::MainKeyHit);
+                    }
+                }
+
+                // No existing mapping or worker unavailable - select based on load
+                // First, select worker using consistent hashing or load balancing
+                let worker_idx = if let Some(key) = routing_key {
+                    Self::find_by_consistent_hash(workers, info, key)
+                } else {
+                    // Use implicit routing key or fallback to load-based selection
+                    let implicit_key = info.headers.and_then(|h| {
+                        h.get("authorization")
+                            .or_else(|| h.get("x-forwarded-for"))
+                            .or_else(|| h.get("cookie"))
+                            .and_then(|v| v.to_str().ok())
+                            .filter(|s| !s.is_empty())
+                    });
+
+                    if let Some(key) = implicit_key {
+                        Self::find_by_consistent_hash(workers, info, key)
+                    } else {
+                        // Fallback: select worker with lowest load
+                        self.select_worker_by_load(workers)
+                    }
+                };
+
+                if let Some(idx) = worker_idx {
+                    let worker_url = workers[idx].url();
+                    // Get least loaded DP rank for this worker
+                    if let Some(dp_rank) = dp_manager.get_least_loaded_dp_rank(worker_url) {
+                        // Assign the mapping
+                        dp_manager.assign_worker_dp(key, worker_url.to_string(), dp_rank);
+                        return (Some(idx), Branch::MainKeyLoadBased);
+                    }
+                }
+            }
+        }
+
+        // Priority 3: X-SMG-Routing-Key - consistent hash routing (O(log n))
         if let Some(key) = routing_key {
             return match Self::find_by_consistent_hash(workers, info, key) {
                 Some(idx) => (Some(idx), Branch::RoutingKeyHit),
@@ -164,6 +225,27 @@ impl ConsistentHashingPolicy {
             .unwrap();
 
         (Some(idx), Branch::RandomFallback)
+    }
+
+    /// Select worker based on load (lowest load wins)
+    fn select_worker_by_load(&self, workers: &[Arc<dyn Worker>]) -> Option<usize> {
+        let healthy_workers: Vec<(usize, &Arc<dyn Worker>)> = workers
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.is_healthy())
+            .collect();
+
+        if healthy_workers.is_empty() {
+            return None;
+        }
+
+        // Find worker with minimum load
+        let (idx, _) = healthy_workers
+            .iter()
+            .min_by_key(|(_, w)| w.load())
+            .unwrap();
+
+        Some(*idx)
     }
 }
 

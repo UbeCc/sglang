@@ -16,8 +16,8 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+        is_retryable_status, AttachedBody, ConnectionMode, DpRoutingManager, RetryExecutor, Worker,
+        WorkerLoadGuard, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
     },
     observability::{
         events::{self, Event},
@@ -50,6 +50,7 @@ pub struct Router {
     dp_aware: bool,
     enable_igw: bool,
     retry_config: RetryConfig,
+    dp_routing_manager: Option<Arc<DpRoutingManager>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -61,6 +62,7 @@ impl std::fmt::Debug for Router {
             .field("dp_aware", &self.dp_aware)
             .field("enable_igw", &self.enable_igw)
             .field("retry_config", &self.retry_config)
+            .field("dp_routing_manager", &self.dp_routing_manager.is_some())
             .finish()
     }
 }
@@ -75,6 +77,7 @@ impl Router {
             dp_aware: ctx.router_config.dp_aware,
             enable_igw: ctx.router_config.enable_igw,
             retry_config: ctx.router_config.effective_retry_config(),
+            dp_routing_manager: ctx.dp_routing_manager.clone(),
         })
     }
 
@@ -135,6 +138,7 @@ impl Router {
         model_id: Option<&str>,
         text: Option<&str>,
         headers: Option<&HeaderMap>,
+        json_body: Option<&serde_json::Value>,
     ) -> Option<Arc<dyn Worker>> {
         let effective_model_id = if !self.enable_igw { None } else { model_id };
 
@@ -167,6 +171,10 @@ impl Router {
             .worker_registry
             .get_hash_ring(effective_model_id.unwrap_or(UNKNOWN_MODEL_ID));
 
+        // Extract main_key from headers or JSON body
+        let main_key = header_utils::extract_main_key_from_headers(headers)
+            .or_else(|| json_body.and_then(header_utils::extract_main_key_from_json));
+
         let idx = policy.select_worker(
             &available,
             &SelectWorkerInfo {
@@ -174,6 +182,9 @@ impl Router {
                 tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                 headers,
                 hash_ring,
+                main_key,
+                json_body,
+                dp_routing_manager: self.dp_routing_manager.as_deref(),
             },
         )?;
 
@@ -276,7 +287,10 @@ impl Router {
         is_stream: bool,
         text: &str,
     ) -> Response {
-        let worker = match self.select_worker_for_model(model_id, Some(text), headers) {
+        // Convert request to JSON for main_key extraction
+        let json_body = serde_json::to_value(typed_req).ok();
+
+        let worker = match self.select_worker_for_model(model_id, Some(text), headers, json_body.as_ref()) {
             Some(w) => w,
             None => {
                 return error::service_unavailable(

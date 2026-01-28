@@ -812,6 +812,9 @@ impl PDRouter {
                     tokens: None, // HTTP doesn't have tokens, use gRPC for PrefixHash
                     headers,
                     hash_ring,
+                    main_key: None,
+                    json_body: None,
+                    dp_routing_manager: None,
                 },
             )
             .ok_or_else(|| {

@@ -7,6 +7,7 @@ use http::header::HeaderName;
 
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
+static HEADER_MAIN_KEY: HeaderName = HeaderName::from_static("x-smg-main-key");
 
 fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -> Option<&'a str> {
     headers
@@ -21,6 +22,20 @@ pub fn extract_target_worker(headers: Option<&HeaderMap>) -> Option<&str> {
 
 pub fn extract_routing_key(headers: Option<&HeaderMap>) -> Option<&str> {
     extract_header_value(headers, &HEADER_ROUTING_KEY)
+}
+
+/// Extract main_key from headers
+/// Looks for X-SMG-Main-Key header
+pub fn extract_main_key_from_headers(headers: Option<&HeaderMap>) -> Option<&str> {
+    extract_header_value(headers, &HEADER_MAIN_KEY)
+}
+
+/// Extract main_key from JSON body
+/// Looks for "main_key" field in the JSON value
+pub fn extract_main_key_from_json(body: &serde_json::Value) -> Option<&str> {
+    body.get("main_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
 }
 
 /// Copy request headers to a Vec of name-value string pairs

@@ -9,8 +9,8 @@ use tracing::{debug, info};
 use crate::{
     config::RouterConfig,
     core::{
-        steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService,
-        UNKNOWN_MODEL_ID,
+        steps::WorkflowEngines, DpRoutingManager, JobQueue, LoadMonitor, WorkerRegistry,
+        WorkerService, UNKNOWN_MODEL_ID,
     },
     data_connector::{
         create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
@@ -66,6 +66,8 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    /// DP routing manager for maintaining main_key -> (worker_url, dp_rank) mappings
+    pub dp_routing_manager: Option<Arc<DpRoutingManager>>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -94,6 +96,7 @@ pub struct AppContextBuilder {
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_manager: Option<Arc<OnceLock<Arc<McpManager>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
+    dp_routing_manager: Option<Arc<DpRoutingManager>>,
 }
 
 impl AppContext {
@@ -134,6 +137,7 @@ impl AppContextBuilder {
             workflow_engines: None,
             mcp_manager: None,
             wasm_manager: None,
+            dp_routing_manager: None,
         }
     }
 
@@ -231,6 +235,11 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn dp_routing_manager(mut self, dp_routing_manager: Option<Arc<DpRoutingManager>>) -> Self {
+        self.dp_routing_manager = dp_routing_manager;
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -288,6 +297,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            dp_routing_manager: self.dp_routing_manager,
         })
     }
 
@@ -312,6 +322,7 @@ impl AppContextBuilder {
             .with_mcp_manager(&router_config)
             .await?
             .with_wasm_manager(&router_config)?
+            .with_dp_routing_manager()
             .router_config(router_config))
     }
 
@@ -591,6 +602,24 @@ impl AppContextBuilder {
             None
         };
         Ok(self)
+    }
+
+    /// Create DP routing manager from environment variable DP_SIZE
+    fn with_dp_routing_manager(mut self) -> Self {
+        // Read DP_SIZE from environment variable, default to 1 if not set
+        let dp_size = std::env::var("DP_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+
+        if dp_size > 1 {
+            debug!("Initializing DP routing manager with dp_size: {}", dp_size);
+            self.dp_routing_manager = Some(Arc::new(DpRoutingManager::new(dp_size)));
+        } else {
+            debug!("DP_SIZE not set or <= 1, skipping DP routing manager initialization");
+        }
+
+        self
     }
 }
 

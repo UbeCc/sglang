@@ -522,6 +522,75 @@ async fn v1_tokenizers_remove(
     tokenize::remove_tokenizer(&state.context, &tokenizer_id).await
 }
 
+// ============================================================================
+// DP Routing Management Handlers
+// ============================================================================
+
+async fn clear_token(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let main_key = body
+        .get("main_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    if main_key.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "main_key parameter is required",
+                    "type": "invalid_request_error",
+                    "code": "missing_main_key"
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let main_key = main_key.unwrap();
+
+    // Check if dp_routing_manager exists in context
+    if let Some(dp_manager) = &state.context.dp_routing_manager {
+        let removed = dp_manager.remove_key(main_key);
+        if removed {
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "main_key": main_key,
+                    "status": "deleted"
+                })),
+            )
+                .into_response()
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": "Key not found",
+                        "type": "not_found_error",
+                        "code": "key_not_found"
+                    }
+                })),
+            )
+                .into_response()
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "message": "DP routing manager is not available",
+                    "type": "service_unavailable_error",
+                    "code": "dp_manager_unavailable"
+                }
+            })),
+        )
+            .into_response()
+    }
+}
+
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -628,7 +697,9 @@ pub fn build_app(
         .route(
             "/v1/tokenizers/{tokenizer_id}/status",
             get(v1_tokenizers_status),
-        );
+        )
+        // DP routing management endpoints
+        .route("/clear_token", post(clear_token));
 
     // Build worker routes
     let worker_routes = Router::new()

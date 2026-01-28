@@ -162,10 +162,17 @@ pub struct SelectWorkerInfo<'a> {
     /// Policies can extract routing information from headers like:
     /// - X-SMG-Target-Worker: Direct routing to a specific worker by index
     /// - X-SMG-Routing-Key: Consistent hash routing for session affinity
+    /// - X-SMG-Main-Key: Main key for DP routing
     pub headers: Option<&'a http::HeaderMap>,
     /// Pre-computed hash ring for O(log n) consistent hashing
     /// Built and cached by WorkerRegistry, passed through to avoid per-request rebuilds
     pub hash_ring: Option<Arc<HashRing>>,
+    /// Main key for DP routing (extracted from headers or body)
+    pub main_key: Option<&'a str>,
+    /// JSON body for extracting main_key
+    pub json_body: Option<&'a serde_json::Value>,
+    /// DP routing manager for maintaining main_key -> (worker_url, dp_rank) mappings
+    pub dp_routing_manager: Option<&'a crate::core::DpRoutingManager>,
 }
 
 #[cfg(test)]
